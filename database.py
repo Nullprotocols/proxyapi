@@ -122,6 +122,5 @@ def toggle_api_key_status(key):
     c.execute("UPDATE api_keys SET is_active = NOT is_active WHERE key=?", (key,))
     conn.commit()
 
-# ---------- DATABASE CLEANUP (optional, for graceful shutdown) ----------
 def close_db():
     conn.close()

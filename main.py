@@ -1,126 +1,23 @@
-import os
 import json
-import sqlite3
 import threading
 import time
-import secrets
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
 import requests
-from dotenv import load_dotenv
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-load_dotenv()
+# Import local modules
+from config import *
+from database import *
 
-# ---------- CONFIG ----------
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID"))
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
-PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_URL = f"{RENDER_URL}/webhook"
-
-ORIGINAL_API_URL = os.getenv("ORIGINAL_API_URL")
-ORIGINAL_API_KEY = os.getenv("ORIGINAL_API_KEY")
-BLACKLIST_KEYS = [k.strip() for k in os.getenv("BLACKLIST_KEYS", "").split(",")]
-
-# Cache for proxy (fast)
+# ---------- FAST CACHE ----------
 cache = {}
-CACHE_TTL = 300
 
-# ---------- DATABASE ----------
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS users
-             (user_id INTEGER PRIMARY KEY,
-              username TEXT, first_name TEXT, last_name TEXT,
-              is_banned INTEGER DEFAULT 0,
-              is_owner INTEGER DEFAULT 0,
-              joined_at TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS api_keys
-             (key TEXT PRIMARY KEY,
-              created_by INTEGER,
-              created_at TEXT,
-              expires_at TEXT,
-              rate_limit_per_min INTEGER DEFAULT 60,
-              allowed_endpoints TEXT DEFAULT '*',
-              is_active INTEGER DEFAULT 1,
-              custom_name TEXT)''')
-conn.commit()
-
-# ---------- USER HELPERS ----------
-def get_user(user_id, username="", first_name="", last_name=""):
-    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = c.fetchone()
-    if not user:
-        c.execute("INSERT INTO users (user_id, username, first_name, last_name, joined_at) VALUES (?,?,?,?,?)",
-                  (user_id, username, first_name, last_name, datetime.now().isoformat()))
-        conn.commit()
-        return {"user_id": user_id, "username": username, "first_name": first_name, "last_name": last_name, "is_banned": 0, "is_owner": 0}
-    return {"user_id": user[0], "username": user[1], "first_name": user[2], "last_name": user[3], "is_banned": user[4], "is_owner": user[5]}
-
-def is_admin(user_id):
-    if user_id == OWNER_ID:
-        return True
-    c.execute("SELECT is_owner FROM users WHERE user_id=?", (user_id,))
-    res = c.fetchone()
-    return res and res[0] == 1
-
-def get_all_users(offset=0, limit=15):
-    c.execute("SELECT * FROM users ORDER BY joined_at LIMIT ? OFFSET ?", (limit, offset))
-    return c.fetchall()
-
-def count_users():
-    c.execute("SELECT COUNT(*) FROM users")
-    return c.fetchone()[0]
-
-def toggle_ban(user_id):
-    c.execute("UPDATE users SET is_banned = NOT is_banned WHERE user_id=?", (user_id,))
-    conn.commit()
-
-def set_owner(user_id, is_owner):
-    c.execute("UPDATE users SET is_owner = ? WHERE user_id=?", (1 if is_owner else 0, user_id))
-    conn.commit()
-
-# ---------- API KEY HELPERS ----------
-def generate_random_key():
-    return f"ak_{secrets.token_hex(16)}"
-
-def create_api_key(key, created_by, expires_days=30, rate_limit=60, allowed_endpoints="*", custom_name=""):
-    expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat()
-    c.execute("INSERT OR REPLACE INTO api_keys (key, created_by, created_at, expires_at, rate_limit_per_min, allowed_endpoints, is_active, custom_name) VALUES (?,?,?,?,?,?,?,?)",
-              (key, created_by, datetime.now().isoformat(), expires_at, rate_limit, allowed_endpoints, 1, custom_name))
-    conn.commit()
-
-def validate_api_key(key):
-    c.execute("SELECT created_by, expires_at, rate_limit_per_min, is_active FROM api_keys WHERE key=?", (key,))
-    row = c.fetchone()
-    if not row:
-        return False, None, None
-    created_by, expires_at, rate_limit, is_active = row
-    if not is_active or datetime.now() > datetime.fromisoformat(expires_at):
-        return False, None, None
-    return True, created_by, rate_limit
-
-def list_api_keys(created_by=None):
-    if created_by:
-        c.execute("SELECT key, expires_at, rate_limit_per_min, custom_name, is_active FROM api_keys WHERE created_by=?", (created_by,))
-    else:
-        c.execute("SELECT key, expires_at, rate_limit_per_min, custom_name, is_active, created_by FROM api_keys")
-    return c.fetchall()
-
-def delete_api_key(key):
-    c.execute("DELETE FROM api_keys WHERE key=?", (key,))
-    conn.commit()
-
-def toggle_api_key_status(key):
-    c.execute("UPDATE api_keys SET is_active = NOT is_active WHERE key=?", (key,))
-    conn.commit()
-
-# ---------- PROXY API (FAST) ----------
+# ---------- PROXY API (FLASK) ----------
 app = Flask(__name__)
 
 def remove_branding(data):
+    """Recursively remove any key or value containing blacklisted words"""
     if isinstance(data, str):
         for term in BLACKLIST_KEYS:
             if term.lower() in data.lower():
@@ -150,22 +47,22 @@ def proxy_api():
     number = request.args.get('number')
     if not key or not number:
         return jsonify({"error": "Missing key or number parameter"}), 400
+
     valid, _, _ = validate_api_key(key)
     if not valid:
         return jsonify({"error": "Invalid or expired API key"}), 403
+
     cache_key = f"num_{number}"
     now = time.time()
     if cache_key in cache and (now - cache[cache_key]['ts']) < CACHE_TTL:
         return app.response_class(response=cache[cache_key]['data'], status=200, mimetype='application/json')
+
     try:
         url = f"{ORIGINAL_API_URL}?key={ORIGINAL_API_KEY}&number={number}"
         resp = requests.get(url, timeout=10)
         data = resp.json()
         cleaned = remove_branding(data)
-        cleaned["branding"] = {
-            "developer": os.getenv("BRANDING_DEVELOPER"),
-            "powered_by": os.getenv("BRANDING_POWERED")
-        }
+        cleaned["branding"] = BRANDING
         pretty_json = json.dumps(cleaned, indent=2, ensure_ascii=False)
         cache[cache_key] = {'data': pretty_json, 'ts': now}
         return app.response_class(response=pretty_json, status=200, mimetype='application/json')
@@ -174,10 +71,10 @@ def proxy_api():
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
-# ---------- TELEGRAM BOT SETUP ----------
-application = Application.builder().token(BOT_TOKEN).build()
+# ---------- TELEGRAM BOT ----------
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def send_message(chat_id, text, reply_markup=None):
     await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=reply_markup)
@@ -235,11 +132,11 @@ async def apihelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- ADMIN: CUSTOM KEY ----------
 async def customkey_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(user_id, OWNER_ID):
         await send_message(user_id, "⛔ Admin only.")
         return
     context.user_data['custom_key_step'] = 'awaiting_key'
-    await send_message(user_id, "🔧 <b>Create Custom API Key</b>\n\nSend desired key (e.g., <code>my_super_key</code>).\nType <code>cancel</code> to abort.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_custom")]]))
+    await send_message(user_id, "🔧 <b>Create Custom API Key</b>\n\nSend desired key.\nType <code>cancel</code> to abort.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_custom")]]))
 
 async def cancel_custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -271,7 +168,7 @@ async def handle_custom_key_input(update: Update, context: ContextTypes.DEFAULT_
         rate = int(text) if text.isdigit() else 60
         context.user_data['custom_ratelimit'] = rate
         context.user_data['custom_key_step'] = 'awaiting_name'
-        await send_message(user_id, "Enter a custom name/label for this key (e.g., 'VIP Plan').")
+        await send_message(user_id, "Enter a custom name/label for this key.")
     elif step == 'awaiting_name':
         name = text
         key = context.user_data['custom_key']
@@ -282,10 +179,10 @@ async def handle_custom_key_input(update: Update, context: ContextTypes.DEFAULT_
         context.user_data.pop('custom_key_step', None)
         await admin_panel(update, context)
 
-# ---------- ADMIN PANEL ----------
+# ---------- ADMIN PANEL (ALL CALLBACKS) ----------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_admin(user_id):
+    if not is_admin(user_id, OWNER_ID):
         await send_message(user_id, "⛔ Access Denied.")
         return
     keyboard = InlineKeyboardMarkup([
@@ -300,6 +197,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await send_message(user_id, "🛡️ <b>Admin Control Center</b>", reply_markup=keyboard)
 
+async def close_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Panel closed. Use /admin to reopen.")
+    await start(update, context)
+
 async def list_all_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -313,13 +216,6 @@ async def list_all_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{status} <code>{k[:24]}...</code> | {name or 'Unnamed'} | Exp: {expires[:10]} | {rate}/min | Owner: {created_by}\n"
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]))
 
-async def close_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("Panel closed. Use /admin to reopen.")
-    await start(update, context)
-
-# ---------- BROADCAST, USER LIST, BAN, OWNERS ----------
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -472,7 +368,7 @@ async def admin_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await admin_panel(update, context)
 
-# ---------- REGISTER HANDLERS ----------
+# ---------- HANDLER REGISTRATION ----------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("admin", admin_panel))
 application.add_handler(CommandHandler("genkey", genkey_command))
@@ -507,7 +403,7 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_broadcast_co
 application.add_handler(MessageHandler(filters.Sticker.ALL, handle_broadcast_content))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_content))
 
-# ---------- SELF-PING ----------
+# ---------- SELF-PING (KEEP ALIVE FOR RENDER) ----------
 def self_ping():
     while True:
         time.sleep(300)
@@ -526,10 +422,13 @@ def webhook():
     return "ok", 200
 
 def set_webhook():
-    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}")
-    print("Webhook set")
+    try:
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}")
+        print("Webhook set successfully")
+    except Exception as e:
+        print(f"Webhook error: {e}")
 
-# ---------- MAIN ----------
+# ---------- MAIN ENTRY ----------
 if __name__ == '__main__':
     set_webhook()
     from werkzeug.serving import run_simple

@@ -1,7 +1,6 @@
 import json
 import threading
 import time
-import asyncio
 import requests
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,9 +11,8 @@ from datetime import datetime
 from config import *
 from database import *
 
-# ---------- FORCE WEBHOOK URL (HARDCODED) ----------
+# ---------- RENDER URL (hardcoded as per your service) ----------
 RENDER_URL = "https://proxyapi-89pj.onrender.com"
-WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # ---------- FAST CACHE ----------
 cache = {}
@@ -52,16 +50,13 @@ def proxy_api():
     number = request.args.get('number')
     if not key or not number:
         return jsonify({"error": "Missing key or number parameter"}), 400
-
     valid, _, _ = validate_api_key(key)
     if not valid:
         return jsonify({"error": "Invalid or expired API key"}), 403
-
     cache_key = f"num_{number}"
     now = time.time()
     if cache_key in cache and (now - cache[cache_key]['ts']) < CACHE_TTL:
         return app.response_class(response=cache[cache_key]['data'], status=200, mimetype='application/json')
-
     try:
         url = f"{ORIGINAL_API_URL}?key={ORIGINAL_API_KEY}&number={number}"
         resp = requests.get(url, timeout=10)
@@ -78,7 +73,7 @@ def proxy_api():
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
-# ---------- TELEGRAM BOT ----------
+# ---------- TELEGRAM BOT (POLLING MODE) ----------
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def send_message(chat_id, text, reply_markup=None):
@@ -408,53 +403,23 @@ application.add_handler(MessageHandler(filters.Document.ALL, handle_broadcast_co
 application.add_handler(MessageHandler(filters.Sticker.ALL, handle_broadcast_content))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_content))
 
-# ---------- SELF-PING (KEEP ALIVE FOR RENDER) ----------
+# ---------- SELF-PING (KEEP ALIVE) ----------
 def self_ping():
     while True:
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)
         try:
             requests.get(f"{RENDER_URL}/health", timeout=5)
             print("Self-ping sent")
-        except Exception as e:
-            print(f"Self-ping failed: {e}")
+        except:
+            pass
 
 threading.Thread(target=self_ping, daemon=True).start()
 
-# ---------- WEBHOOK (FIXED ASYNC HANDLING) ----------
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    json_data = request.get_json(force=True)
-    update = Update.de_json(json_data, application.bot)
-    # Create new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(application.process_update(update))
-    finally:
-        loop.close()
-    return "ok", 200
-
-def set_webhook():
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}"
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("ok"):
-                print(f"✅ Webhook set successfully to {WEBHOOK_URL}")
-            else:
-                print(f"❌ Webhook failed: {data}")
-        else:
-            print(f"❌ Webhook HTTP error: {response.status_code}")
-    except Exception as e:
-        print(f"❌ Webhook exception: {e}")
-
-# ---------- MAIN ENTRY ----------
+# ---------- MAIN (POLLING) ----------
 if __name__ == '__main__':
-    set_webhook()
-    time.sleep(2)  # Allow webhook registration
+    # Start Flask in background thread
     from werkzeug.serving import run_simple
     threading.Thread(target=lambda: run_simple('0.0.0.0', PORT, app, use_reloader=False, threaded=True)).start()
-    # Keep main thread alive
-    while True:
-        time.sleep(3600)
+    # Start bot polling (this blocks)
+    print("✅ Bot started in polling mode. Waiting for messages...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)

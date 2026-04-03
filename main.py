@@ -1,10 +1,12 @@
 import json
 import threading
 import time
+import asyncio
 import requests
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from datetime import datetime
 
 # Import local modules
 from config import *
@@ -13,8 +15,6 @@ from database import *
 # ---------- FORCE WEBHOOK URL (HARDCODED) ----------
 RENDER_URL = "https://proxyapi-89pj.onrender.com"
 WEBHOOK_URL = f"{RENDER_URL}/webhook"
-# Override config.py's RENDER_URL if needed
-# ----------
 
 # ---------- FAST CACHE ----------
 cache = {}
@@ -23,7 +23,6 @@ cache = {}
 app = Flask(__name__)
 
 def remove_branding(data):
-    """Recursively remove any key or value containing blacklisted words"""
     if isinstance(data, str):
         for term in BLACKLIST_KEYS:
             if term.lower() in data.lower():
@@ -412,19 +411,27 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_b
 # ---------- SELF-PING (KEEP ALIVE FOR RENDER) ----------
 def self_ping():
     while True:
-        time.sleep(300)
+        time.sleep(300)  # 5 minutes
         try:
             requests.get(f"{RENDER_URL}/health", timeout=5)
-        except:
-            pass
+            print("Self-ping sent")
+        except Exception as e:
+            print(f"Self-ping failed: {e}")
 
 threading.Thread(target=self_ping, daemon=True).start()
 
-# ---------- WEBHOOK ----------
+# ---------- WEBHOOK (FIXED ASYNC HANDLING) ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.process_update(update)
+    json_data = request.get_json(force=True)
+    update = Update.de_json(json_data, application.bot)
+    # Create new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(application.process_update(update))
+    finally:
+        loop.close()
     return "ok", 200
 
 def set_webhook():
@@ -445,8 +452,9 @@ def set_webhook():
 # ---------- MAIN ENTRY ----------
 if __name__ == '__main__':
     set_webhook()
-    time.sleep(2)  # Give time for webhook to register
+    time.sleep(2)  # Allow webhook registration
     from werkzeug.serving import run_simple
     threading.Thread(target=lambda: run_simple('0.0.0.0', PORT, app, use_reloader=False, threaded=True)).start()
+    # Keep main thread alive
     while True:
         time.sleep(3600)

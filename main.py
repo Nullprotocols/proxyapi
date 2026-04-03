@@ -10,6 +10,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from config import *
 from database import *
 
+# ---------- FORCE WEBHOOK URL (HARDCODED) ----------
+RENDER_URL = "https://proxyapi-89pj.onrender.com"
+WEBHOOK_URL = f"{RENDER_URL}/webhook"
+# Override config.py's RENDER_URL if needed
+# ----------
+
 # ---------- FAST CACHE ----------
 cache = {}
 
@@ -422,15 +428,24 @@ def webhook():
     return "ok", 200
 
 def set_webhook():
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}"
     try:
-        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}")
-        print("Webhook set successfully")
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("ok"):
+                print(f"✅ Webhook set successfully to {WEBHOOK_URL}")
+            else:
+                print(f"❌ Webhook failed: {data}")
+        else:
+            print(f"❌ Webhook HTTP error: {response.status_code}")
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"❌ Webhook exception: {e}")
 
 # ---------- MAIN ENTRY ----------
 if __name__ == '__main__':
     set_webhook()
+    time.sleep(2)  # Give time for webhook to register
     from werkzeug.serving import run_simple
     threading.Thread(target=lambda: run_simple('0.0.0.0', PORT, app, use_reloader=False, threaded=True)).start()
     while True:

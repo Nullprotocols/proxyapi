@@ -10,10 +10,9 @@ if not TELEGRAM_BOT_TOKEN:
 
 OWNER_ID = int(os.getenv("OWNER_ID", "8104850843"))
 
-# ---------- RENDER URL (main.py override kar dega, still keep for safety) ----------
+# ---------- RENDER URL (same as your app) ----------
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://proxyapi-89pj.onrender.com")
 PORT = int(os.getenv("PORT", "8080"))
-WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 # ---------- ORIGINAL API ----------
 ORIGINAL_API_URL = os.getenv("ORIGINAL_API_URL", "https://ayaanmods.site/number.php")
